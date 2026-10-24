@@ -1,0 +1,5 @@
+node_modules/
+*.tmp
+bridge.config.json
+state/
+keys/

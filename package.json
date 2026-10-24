@@ -1,0 +1,21 @@
+{
+  "name": "zcash-escrow-bridge",
+  "version": "0.1.0",
+  "description": "Bring a collectible held in a marketplace's records onto shielded Zcash, one for one, and back at any time.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "bridge": "./src/cli.ts"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "demo": "node demo/standin-cycle.ts"
+  },
+  "dependencies": {
+    "@noble/curves": "1.9.7",
+    "@noble/hashes": "1.8.0"
+  }
+}
