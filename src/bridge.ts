@@ -17,7 +17,7 @@ import { ACCOUNT_ID, type Escrow } from "./escrow.ts";
 import type { Ledger } from "./ledger.ts";
 import { publicKey, signTransfer } from "./transfer.ts";
 import { challengeAsk, sameAsk, type Venue } from "./venue.ts";
-import type { Payment } from "./zip321.ts";
+import { MESSAGE_ZAT, type Payment } from "./zip321.ts";
 
 export const DEPOSIT_TTL_MS = 24 * 3_600_000;
 const KEY = /^[0-9a-f]{64}$/;
@@ -87,8 +87,10 @@ export type BridgeConfig = {
   cid: string;
   /** the protocol inbox: where transfer memos are sent */
   inbox: string;
-  /** the custody key's secret: signs issuance transfers only */
-  custodySecret: Uint8Array;
+  /** the custody key's public half (hex): it holds every copy not issued */
+  custodyKey: string;
+  /** the custody key's secret, read only when an issuance is signed (so it can come from a credential store then) */
+  custodySecret: () => Uint8Array;
   /** item ids run 1 … maxItem; the copy of item N is token N */
   maxItem: number;
   /** "sender" when the escrow's view shows who sent an item, else "listing" */
@@ -103,7 +105,8 @@ export class Bridge {
   private readonly c: BridgeConfig;
   constructor(c: BridgeConfig) {
     this.c = c;
-    this.custodyKey = publicKey(c.custodySecret);
+    if (!KEY.test(c.custodyKey)) throw new Error("the custody key is an Ed25519 public key in hex");
+    this.custodyKey = c.custodyKey;
     this.cid8 = c.cid.slice(0, 16);
     this.now = c.now ?? (() => new Date());
   }
@@ -186,16 +189,18 @@ export class Bridge {
     if (!(await this.c.escrow.holds(item))) throw new Error(`the escrow no longer holds #${item}`);
     const t = await this.c.ledger.token(this.cid8, item);
     if (!t) throw new Error(`no copy #${item} on the ledger`);
-    if (t.holder === d.holderKey) return { deposit: await this.markIssued(item), payment: { address: this.c.inbox, zat: 0n, memo: d.memo! } };
+    if (t.holder === d.holderKey) return { deposit: await this.markIssued(item), payment: { address: this.c.inbox, zat: MESSAGE_ZAT, memo: d.memo! } };
     if (t.holder !== this.custodyKey) throw new Error(`copy #${item} is not in custody`);
-    const memo = signTransfer({ pid: this.c.pid, cid: this.c.cid, id: item, sq: t.sq, to: d.holderKey, secret: this.c.custodySecret });
+    const secret = this.c.custodySecret();
+    if (publicKey(secret) !== this.custodyKey) throw new Error("the custody secret given is not the custody key's: nothing signed");
+    const memo = signTransfer({ pid: this.c.pid, cid: this.c.cid, id: item, sq: t.sq, to: d.holderKey, secret });
     const deposit = this.change((s) => {
       const x = s.deposits[item]!;
       x.state = "issuing";
       x.memo = memo;
       return x;
     });
-    return { deposit, payment: { address: this.c.inbox, zat: 0n, memo } };
+    return { deposit, payment: { address: this.c.inbox, zat: MESSAGE_ZAT, memo } };
   }
 
   /** The ledger shows the copy with the holder: the deposit is done. */

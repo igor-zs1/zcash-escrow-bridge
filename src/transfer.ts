@@ -11,7 +11,8 @@
  *   to:<key>        the new holder key, hex
  *   sg:<signature>  Ed25519 over BLAKE2b-256("SAPC_sig_v1_____", pid ‖ cid ‖ body), body = every line above but sg
  *
- * The memo goes as a zero-value output to the protocol inbox; the ledger's index applies it in block order.
+ * The memo goes on an output to the protocol inbox (0.0001 ZEC, zip321.ts MESSAGE_ZAT); the ledger's index applies it in
+ * block order.
  */
 import { ed25519 } from "@noble/curves/ed25519";
 import { blake2b } from "@noble/hashes/blake2b";

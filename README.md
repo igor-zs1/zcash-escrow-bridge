@@ -107,6 +107,7 @@ The operator's command line (`src/cli.ts`) reads `bridge.config.json`:
   "pid": "<the ledger's protocol id>",
   "cid": "<the bridged collection's id>",
   "inbox": "<the protocol inbox address>",
+  "custodyKey": "<the custody key's public half>",
   "custodySecretFile": "keys/custody.hex",
   "maxItem": 10000,
   "binding": "listing",
@@ -114,6 +115,10 @@ The operator's command line (`src/cli.ts`) reads `bridge.config.json`:
   "escrowBook": "state/escrow.json"
 }
 ```
+
+The custody key's secret is read only by the commands that sign with it (`deposit issue`, `proof --attest`), and only
+after checking it is the configured key; its file may be `/dev/stdin`, so it can stream from a credential store and
+never touch a disk. Every message's payment request carries 0.0001 ZEC, since some wallets refuse a zero amount.
 
 Holders sign redemptions and their own transfers with `bridge holder sign-redeem` and `bridge holder transfer`, which
 print a memo and a `zcash:` payment request any memo-capable wallet can send.

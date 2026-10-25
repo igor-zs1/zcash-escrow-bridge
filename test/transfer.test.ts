@@ -42,4 +42,6 @@ test("a payment request carries each output, the memo as base64url", () => {
   const uri = paymentUri([{ address: "utest1abc", zat: 0n, memo: "t:sapc" }, { address: "utest1def", zat: 150_000_000n }]);
   assert.equal(uri, `zcash:?address=utest1abc&amount=0&memo=${Buffer.from("t:sapc").toString("base64url")}&address.1=utest1def&amount.1=1.5`);
   assert.throws(() => paymentUri([{ address: "utest1abc", zat: 0n, memo: "x".repeat(513) }]));
+  // one payment: the address in the path, as librustzcash writes it
+  assert.equal(paymentUri([{ address: "utest1abc", zat: 10_000n, memo: "t:sapc" }]), `zcash:utest1abc?amount=0.0001&memo=${Buffer.from("t:sapc").toString("base64url")}`);
 });

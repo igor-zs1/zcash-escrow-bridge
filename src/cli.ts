@@ -20,7 +20,9 @@
  *   bridge holder sign-redeem <pid> <item> <ZR-XXXX-XXXX> <secret file>
  *   bridge holder transfer <pid> <cid> <item> <sq> <toKey> <inbox> <secret file>
  *
- * Secrets are read from files and never printed.
+ * Secrets are read from files and never printed. The custody key is read only by the commands that sign with it
+ * (deposit issue, proof --attest); its file may be /dev/stdin, so it can stream from a credential store and never touch
+ * a disk. The config names its public half (custodyKey) for everything else.
  */
 import { randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -32,9 +34,9 @@ import { HttpLedger } from "./ledger.ts";
 import { attest, backing } from "./proof.ts";
 import { publicKey, signTransfer } from "./transfer.ts";
 import { HttpVenue, MARKER_ASK } from "./venue.ts";
-import { paymentUri } from "./zip321.ts";
+import { MESSAGE_ZAT, paymentUri } from "./zip321.ts";
 
-type Config = { ledger: string; venue: string; pid: string; cid: string; inbox: string; custodySecretFile: string; maxItem: number; binding: "sender" | "listing"; state: string; escrowBook: string };
+type Config = { ledger: string; venue: string; pid: string; cid: string; inbox: string; custodyKey: string; custodySecretFile: string; maxItem: number; binding: "sender" | "listing"; state: string; escrowBook: string };
 
 const secretFrom = (path: string): Uint8Array => {
   const hex = readFileSync(path, "utf8").trim();
@@ -56,8 +58,8 @@ function operator() {
   const escrow = new ManualEscrow(c.escrowBook);
   const ledger = new HttpLedger(c.ledger);
   const venue = new HttpVenue(c.venue);
-  const custodySecret = secretFrom(c.custodySecretFile);
-  const bridge = new Bridge({ ledger, venue, escrow, store: new FileStore(c.state), pid: c.pid, cid: c.cid, inbox: c.inbox, custodySecret, maxItem: c.maxItem, binding: c.binding });
+  const custodySecret = () => secretFrom(c.custodySecretFile);
+  const bridge = new Bridge({ ledger, venue, escrow, store: new FileStore(c.state), pid: c.pid, cid: c.cid, inbox: c.inbox, custodyKey: c.custodyKey, custodySecret, maxItem: c.maxItem, binding: c.binding });
   return { c, escrow, ledger, venue, bridge, custodySecret };
 }
 
@@ -77,13 +79,16 @@ async function main(argv: string[]): Promise<void> {
     const [pid, cid, item, sq, to, inbox, file] = rest;
     if (!pid || !cid || !to || !inbox || !file) throw new Error("bridge holder transfer <pid> <cid> <item> <sq> <toKey> <inbox> <secret file>");
     const memo = signTransfer({ pid, cid, id: num(item), sq: num(sq), to, secret: secretFrom(file) });
-    return out({ memo, request: paymentUri([{ address: inbox, zat: 0n, memo }]) });
+    return out({ memo, request: paymentUri([{ address: inbox, zat: MESSAGE_ZAT, memo }]) });
   }
   const { c, escrow, ledger, venue, bridge, custodySecret } = operator();
   const item = () => num(rest[0]);
   if (a === "proof") {
     const p = await backing({ ledger, venue, pid: c.pid, cid8: c.cid.slice(0, 16), custodyKey: bridge.custodyKey });
-    return out(argv.includes("--attest") ? { ...p, attestation: attest(p, custodySecret) } : p);
+    if (!argv.includes("--attest")) return out(p);
+    const secret = custodySecret();
+    if (publicKey(secret) !== bridge.custodyKey) throw new Error("the custody secret given is not the custody key's: nothing signed");
+    return out({ ...p, attestation: attest(p, secret) });
   }
   switch (`${a} ${b}`) {
     case "deposit open": {

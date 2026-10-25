@@ -23,7 +23,7 @@ function world(binding: "sender" | "listing" = "listing") {
   for (let id = 1; id <= 10; id++) venue.byId.set(id, { id, listed: false, ask: null, listedAt: null, purged: id === 10 });
   const escrow = new StandInEscrow(binding === "sender");
   let clock = Date.parse("2026-10-25T12:00:00Z");
-  const bridge = new Bridge({ ledger, venue, escrow, store: new MemoryStore(), pid: PID, cid: CID, inbox: "utest1inbox", custodySecret: custody, maxItem: 10, binding, now: () => new Date(clock) });
+  const bridge = new Bridge({ ledger, venue, escrow, store: new MemoryStore(), pid: PID, cid: CID, inbox: "utest1inbox", custodyKey: publicKey(custody), custodySecret: () => custody, maxItem: 10, binding, now: () => new Date(clock) });
   const tick = (ms = 60_000) => (clock += ms);
   const at = () => new Date(clock).toISOString();
   return { ledger, venue, escrow, bridge, tick, at };
@@ -42,7 +42,7 @@ test("a deposit by listing proof, issued to the holder's key, and its redemption
   venue.list(4, MARKER_ASK, at()); // the escrow marks what it holds
   const { payment } = await bridge.issue(4);
   assert.equal(payment.address, "utest1inbox");
-  assert.equal(payment.zat, 0n);
+  assert.equal(payment.zat, 10_000n); // 0.0001 ZEC: wallets may refuse a zero amount
   assert.equal(ledger.apply(payment.memo!), null, "the index applies the issuance");
   assert.equal((await ledger.token(bridge.cid8, 4))?.holder, publicKey(holder));
   assert.equal((await bridge.confirmIssued(4)).state, "issued");
@@ -140,4 +140,26 @@ test("the public proof finds an unbacked copy, and the custody key's attestation
   const a = attest(b, custody);
   assert.ok(verifyAttestation(a.text, a.sig, bridge.custodyKey));
   assert.ok(!verifyAttestation(a.text.replace('"backed":false', '"backed":true'), a.sig, bridge.custodyKey));
+});
+
+test("the custody secret is read only to sign an issuance, and a wrong one signs nothing", async () => {
+  const ledger = new MemoryLedger(PID, CID);
+  ledger.reserve(11, publicKey(custody));
+  const venue = new MemoryVenue();
+  for (let id = 1; id <= 10; id++) venue.byId.set(id, { id, listed: false, ask: null, listedAt: null, purged: false });
+  const escrow = new StandInEscrow(true);
+  let reads = 0;
+  let secret = new Uint8Array(32).fill(7); // not the custody key's
+  const bridge = new Bridge({ ledger, venue, escrow, store: new MemoryStore(), pid: PID, cid: CID, inbox: "utest1inbox", custodyKey: publicKey(custody), custodySecret: () => (reads++, secret), maxItem: 10, binding: "sender" });
+  await bridge.openDeposit(2, publicKey(holder), HOLDER_ACCOUNT);
+  escrow.receive(2, HOLDER_ACCOUNT);
+  await bridge.confirmReceived(2);
+  assert.equal(reads, 0, "opening and receiving a deposit never reads the secret");
+  await assert.rejects(bridge.issue(2), /not the custody key's: nothing signed/);
+  assert.equal((await ledger.token(bridge.cid8, 2))?.holder, publicKey(custody));
+  secret = custody;
+  const { payment } = await bridge.issue(2);
+  assert.equal(ledger.apply(payment.memo!), null);
+  assert.equal(reads, 2);
+  assert.throws(() => new Bridge({ ledger, venue, escrow, store: new MemoryStore(), pid: PID, cid: CID, inbox: "x", custodyKey: "nope", custodySecret: () => custody, maxItem: 10, binding: "sender" }), /custody key is an Ed25519 public key/);
 });

@@ -29,7 +29,7 @@ ledger.reserve(101, publicKey(custody));
 const venue = new MemoryVenue();
 for (let id = 1; id <= 100; id++) venue.byId.set(id, { id, listed: false, ask: null, listedAt: null, purged: false });
 const escrow = new StandInEscrow(false);
-const bridge = new Bridge({ ledger, venue, escrow, store: new MemoryStore(), pid: PID, cid: CID, inbox: "utest1protocolinbox", custodySecret: custody, maxItem: 100, binding: "listing" });
+const bridge = new Bridge({ ledger, venue, escrow, store: new MemoryStore(), pid: PID, cid: CID, inbox: "utest1protocolinbox", custodyKey: publicKey(custody), custodySecret: () => custody, maxItem: 100, binding: "listing" });
 const apply = (memo: string) => {
   const err = ledger.apply(memo);
   if (err) throw new Error(err);
