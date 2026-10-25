@@ -111,10 +111,15 @@ The operator's command line (`src/cli.ts`) reads `bridge.config.json`:
   "custodySecretFile": "keys/custody.hex",
   "maxItem": 10000,
   "binding": "listing",
+  "asks": "default",
   "state": "state/bridge.json",
   "escrowBook": "state/escrow.json"
 }
 ```
+
+`asks` picks the challenge and marker asks: `default` (8,888,888.<code> and 9,999,999.31415926 ZEC) or `fallback`
+(6,666,666.<code> and 7,654,321.31415926 ZEC) for a venue that refuses asks that large. Change it only while the escrow
+marks nothing: an item listed at the old marker no longer counts in the proof.
 
 The custody key's secret is read only by the commands that sign with it (`deposit issue`, `proof --attest`), and only
 after checking it is the configured key; its file may be `/dev/stdin`, so it can stream from a credential store and

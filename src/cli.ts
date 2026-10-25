@@ -33,10 +33,10 @@ import { ManualEscrow } from "./escrow.ts";
 import { HttpLedger } from "./ledger.ts";
 import { attest, backing } from "./proof.ts";
 import { publicKey, signTransfer } from "./transfer.ts";
-import { HttpVenue, MARKER_ASK } from "./venue.ts";
+import { HttpVenue, type AsksName } from "./venue.ts";
 import { MESSAGE_ZAT, paymentUri } from "./zip321.ts";
 
-type Config = { ledger: string; venue: string; pid: string; cid: string; inbox: string; custodyKey: string; custodySecretFile: string; maxItem: number; binding: "sender" | "listing"; state: string; escrowBook: string };
+type Config = { ledger: string; venue: string; pid: string; cid: string; inbox: string; custodyKey: string; custodySecretFile: string; maxItem: number; binding: "sender" | "listing"; asks?: AsksName; state: string; escrowBook: string };
 
 const secretFrom = (path: string): Uint8Array => {
   const hex = readFileSync(path, "utf8").trim();
@@ -59,8 +59,10 @@ function operator() {
   const ledger = new HttpLedger(c.ledger);
   const venue = new HttpVenue(c.venue);
   const custodySecret = () => secretFrom(c.custodySecretFile);
-  const bridge = new Bridge({ ledger, venue, escrow, store: new FileStore(c.state), pid: c.pid, cid: c.cid, inbox: c.inbox, custodyKey: c.custodyKey, custodySecret, maxItem: c.maxItem, binding: c.binding });
-  return { c, escrow, ledger, venue, bridge, custodySecret };
+  const bridge = new Bridge({ ledger, venue, escrow, store: new FileStore(c.state), pid: c.pid, cid: c.cid, inbox: c.inbox, custodyKey: c.custodyKey, custodySecret, maxItem: c.maxItem, binding: c.binding, asks: c.asks });
+  // the asks setting changes only while no ticket is open and the escrow marks nothing (refuses, and says why)
+  bridge.assertAsks(escrow.held());
+  return { c, escrow, ledger, venue, bridge, custodySecret, asks: bridge.asks };
 }
 
 async function main(argv: string[]): Promise<void> {
@@ -81,10 +83,10 @@ async function main(argv: string[]): Promise<void> {
     const memo = signTransfer({ pid, cid, id: num(item), sq: num(sq), to, secret: secretFrom(file) });
     return out({ memo, request: paymentUri([{ address: inbox, zat: MESSAGE_ZAT, memo }]) });
   }
-  const { c, escrow, ledger, venue, bridge, custodySecret } = operator();
+  const { c, escrow, ledger, venue, bridge, custodySecret, asks } = operator();
   const item = () => num(rest[0]);
   if (a === "proof") {
-    const p = await backing({ ledger, venue, pid: c.pid, cid8: c.cid.slice(0, 16), custodyKey: bridge.custodyKey });
+    const p = await backing({ ledger, venue, pid: c.pid, cid8: c.cid.slice(0, 16), custodyKey: bridge.custodyKey, marker: asks.marker });
     if (!argv.includes("--attest")) return out(p);
     const secret = custodySecret();
     if (publicKey(secret) !== bridge.custodyKey) throw new Error("the custody secret given is not the custody key's: nothing signed");
@@ -99,7 +101,7 @@ async function main(argv: string[]): Promise<void> {
       return out(await bridge.proveListing(item()));
     case "escrow received":
       escrow.confirmReceived(item(), flag(rest, "--from"));
-      return out({ item: item(), received: true, todo: `list #${item()} at the marker ask ${MARKER_ASK} from the escrow account` });
+      return out({ item: item(), received: true, todo: `list #${item()} at the marker ask ${asks.marker} from the escrow account` });
     case "deposit receive":
       return out(await bridge.confirmReceived(item()));
     case "deposit issue": {

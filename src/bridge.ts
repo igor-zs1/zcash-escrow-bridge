@@ -16,7 +16,7 @@ import { hexToBytes, utf8ToBytes } from "@noble/hashes/utils";
 import { ACCOUNT_ID, type Escrow } from "./escrow.ts";
 import type { Ledger } from "./ledger.ts";
 import { publicKey, signTransfer } from "./transfer.ts";
-import { challengeAsk, sameAsk, type Venue } from "./venue.ts";
+import { asksNamed, challengeAsk, sameAsk, type Asks, type AsksName, type Venue } from "./venue.ts";
 import { MESSAGE_ZAT, type Payment } from "./zip321.ts";
 
 export const DEPOSIT_TTL_MS = 24 * 3_600_000;
@@ -38,7 +38,8 @@ export type Deposit = {
 };
 /** `sq`: the copy's sequence number when its holder signed; the return must be that holder's next move (sq + 1) */
 export type Redemption = { item: number; to: string; holderKey: string; sq: number; sig: string; requestedAt: string; state: "requested" | "returned" | "released" };
-type State = { deposits: Record<string, Deposit>; redemptions: Record<string, Redemption> };
+/** `asks`: the asks setting the first ticket was opened with (venue.ts); it changes only while nothing is open (assertAsks) */
+type State = { deposits: Record<string, Deposit>; redemptions: Record<string, Redemption>; asks?: AsksName };
 
 /** Where the bridge keeps its state: a JSON file written whole, or memory. */
 export interface Store {
@@ -95,12 +96,16 @@ export type BridgeConfig = {
   maxItem: number;
   /** "sender" when the escrow's view shows who sent an item, else "listing" */
   binding: "sender" | "listing";
+  /** the challenge and marker asks by name (venue.ts; "default" when left out) */
+  asks?: AsksName;
   now?: () => Date;
 };
 
 export class Bridge {
   readonly custodyKey: string;
   readonly cid8: string;
+  readonly asksName: AsksName;
+  readonly asks: Asks;
   private readonly now: () => Date;
   private readonly c: BridgeConfig;
   constructor(c: BridgeConfig) {
@@ -108,7 +113,31 @@ export class Bridge {
     if (!KEY.test(c.custodyKey)) throw new Error("the custody key is an Ed25519 public key in hex");
     this.custodyKey = c.custodyKey;
     this.cid8 = c.cid.slice(0, 16);
+    this.asksName = c.asks ?? "default";
+    this.asks = asksNamed(this.asksName);
     this.now = c.now ?? (() => new Date());
+  }
+
+  /**
+   * The asks setting changes only while no ticket is open and the escrow marks nothing: an open ticket's challenge and a
+   * marked item's marker are the old setting's. With a different setting than the state records, this refuses and says
+   * what is still open; with nothing open, it records the new setting.
+   */
+  assertAsks(heldInEscrow: number[]): void {
+    const s = this.c.store.load();
+    if (s.asks === undefined || s.asks === this.asksName) return;
+    const now = this.now().getTime();
+    const open = Object.values(s.deposits)
+      .filter((d) => d.state === "received" || d.state === "issuing" || ((d.state === "open" || d.state === "proven") && Date.parse(d.expiresAt) > now))
+      .map((d) => d.item);
+    if (open.length > 0 || heldInEscrow.length > 0) {
+      throw new Error(
+        `the bridge's state uses the "${s.asks}" asks and the config says "${this.asksName}": they change only while no ticket is open and the escrow marks nothing (open tickets: ${open.join(", ") || "none"}; in escrow: ${heldInEscrow.join(", ") || "none"}). Run with "${s.asks}", or finish those first.`,
+      );
+    }
+    this.change((x) => {
+      x.asks = this.asksName;
+    });
   }
 
   private change<T>(f: (s: State) => T): T {
@@ -136,6 +165,8 @@ export class Bridge {
     if (!v || v.purged) throw new Error(`#${item} does not exist at the marketplace`);
     const t = await this.c.ledger.token(this.cid8, item);
     if (!t || t.holder !== this.custodyKey) throw new Error(`#${item}'s copy is not in custody: it is already out`);
+    const recorded = this.c.store.load().asks;
+    if (recorded !== undefined && recorded !== this.asksName) throw new Error(`the bridge's state uses the "${recorded}" asks and the config says "${this.asksName}": run with "${recorded}", or change it while nothing is open`);
     const open = this.deposit(item);
     if (open && ["open", "proven", "received", "issuing"].includes(open.state) && Date.parse(open.expiresAt) > this.now().getTime()) throw new Error(`#${item} has an open deposit`);
     const code = String(randomInt(0, 100_000_000)).padStart(8, "0");
@@ -145,12 +176,15 @@ export class Bridge {
       binding: this.c.binding,
       sender: this.c.binding === "sender" ? sender : null,
       code,
-      ask: challengeAsk(code),
+      ask: challengeAsk(code, this.asks),
       openedAt: this.now().toISOString(),
       expiresAt: new Date(this.now().getTime() + DEPOSIT_TTL_MS).toISOString(),
       state: "open",
     };
-    this.change((s) => (s.deposits[item] = d));
+    this.change((s) => {
+      s.asks ??= this.asksName;
+      s.deposits[item] = d;
+    });
     return d;
   }
 

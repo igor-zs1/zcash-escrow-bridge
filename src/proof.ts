@@ -17,10 +17,10 @@ import { MARKER_ASK, sameAsk, type Venue } from "./venue.ts";
 
 export type Backing = { at: string; pid: string; cid8: string; custodyKey: string; issued: number[]; marked: number[]; unbacked: number[]; pending: number[]; backed: boolean };
 
-export async function backing(p: { ledger: Ledger; venue: Venue; pid: string; cid8: string; custodyKey: string; now?: Date }): Promise<Backing> {
+export async function backing(p: { ledger: Ledger; venue: Venue; pid: string; cid8: string; custodyKey: string; marker?: string; now?: Date }): Promise<Backing> {
   const tokens = await p.ledger.tokens(p.cid8);
   const issued = tokens.filter((t) => t.id > 0 && t.holder !== p.custodyKey).map((t) => t.id).sort((a, b) => a - b);
-  const marked = (await p.venue.items()).filter((v) => v.listed && sameAsk(v.ask, MARKER_ASK)).map((v) => v.id).sort((a, b) => a - b);
+  const marked = (await p.venue.items()).filter((v) => v.listed && sameAsk(v.ask, p.marker ?? MARKER_ASK)).map((v) => v.id).sort((a, b) => a - b);
   const m = new Set(marked);
   const i = new Set(issued);
   const unbacked = issued.filter((x) => !m.has(x));

@@ -44,6 +44,17 @@ export class ManualEscrow implements Escrow {
   async sender(item: number): Promise<string | null> {
     return this.read().received[item]?.from ?? null;
   }
+  /** every item the book shows in the escrow now (received and not released since) */
+  held(): number[] {
+    const b = this.read();
+    return Object.entries(b.received)
+      .filter(([item, r]) => {
+        const s = b.released[item];
+        return !s || s.at < r.at;
+      })
+      .map(([item]) => Number(item))
+      .sort((x, y) => x - y);
+  }
   async release(item: number): Promise<void> {
     if (await this.holds(item)) throw new Error(`send #${item} back by hand at the marketplace, then run: bridge escrow released ${item}`);
   }

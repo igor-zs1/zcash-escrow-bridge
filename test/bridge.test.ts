@@ -1,13 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { ed25519 } from "@noble/curves/ed25519";
 import { bytesToHex } from "@noble/hashes/utils";
 import { Bridge, MemoryStore, redemptionDigest } from "../src/bridge.ts";
-import { StandInEscrow } from "../src/escrow.ts";
+import { ManualEscrow, StandInEscrow } from "../src/escrow.ts";
 import { MemoryLedger } from "../src/ledger.ts";
 import { attest, backing, verifyAttestation } from "../src/proof.ts";
 import { publicKey, signTransfer } from "../src/transfer.ts";
-import { MARKER_ASK, MemoryVenue } from "../src/venue.ts";
+import { DEFAULT_ASKS, FALLBACK_ASKS, MARKER_ASK, MemoryVenue, asksNamed } from "../src/venue.ts";
 
 const PID = "11".repeat(32);
 const CID = "2a".repeat(32);
@@ -162,4 +167,65 @@ test("the custody secret is read only to sign an issuance, and a wrong one signs
   assert.equal(ledger.apply(payment.memo!), null);
   assert.equal(reads, 2);
   assert.throws(() => new Bridge({ ledger, venue, escrow, store: new MemoryStore(), pid: PID, cid: CID, inbox: "x", custodyKey: "nope", custodySecret: () => custody, maxItem: 10, binding: "sender" }), /custody key is an Ed25519 public key/);
+});
+
+test("the fallback asks: a ticket's challenge and the marker the proof counts both follow the config", async () => {
+  const ledger = new MemoryLedger(PID, CID);
+  ledger.reserve(11, publicKey(custody));
+  const venue = new MemoryVenue();
+  for (let id = 1; id <= 10; id++) venue.byId.set(id, { id, listed: false, ask: null, listedAt: null, purged: false });
+  const escrow = new StandInEscrow(false);
+  let clock = Date.parse("2026-10-25T12:00:00Z");
+  const bridge = new Bridge({ ledger, venue, escrow, store: new MemoryStore(), pid: PID, cid: CID, inbox: "utest1inbox", custodyKey: publicKey(custody), custodySecret: () => custody, maxItem: 10, binding: "listing", asks: "fallback", now: () => new Date(clock) });
+  const d = await bridge.openDeposit(6, publicKey(holder));
+  assert.match(d.ask!, /^6666666\.[0-9]{8}$/);
+  clock += 60_000;
+  venue.list(6, d.ask!, new Date(clock).toISOString());
+  assert.equal((await bridge.proveListing(6)).state, "proven");
+  venue.list(6, FALLBACK_ASKS.marker); // the escrow marks it at the fallback marker
+  venue.list(7, MARKER_ASK); // an item at the default marker does not count under the fallback
+  const p = await backing({ ledger, venue, pid: PID, cid8: bridge.cid8, custodyKey: bridge.custodyKey, marker: FALLBACK_ASKS.marker });
+  assert.deepEqual(p.marked, [6]);
+  assert.deepEqual(asksNamed(undefined), DEFAULT_ASKS);
+  assert.deepEqual(asksNamed("fallback"), FALLBACK_ASKS);
+  assert.throws(() => asksNamed("lower"), /"default" or "fallback"/);
+  assert.ok(Number(FALLBACK_ASKS.marker) < Number(DEFAULT_ASKS.marker) && Number(FALLBACK_ASKS.challenge) < Number(DEFAULT_ASKS.challenge));
+});
+
+test("the asks setting cannot change while a ticket is open or the escrow marks an item, and the CLI says why", async () => {
+  const ledger = new MemoryLedger(PID, CID);
+  ledger.reserve(11, publicKey(custody));
+  const venue = new MemoryVenue();
+  for (let id = 1; id <= 10; id++) venue.byId.set(id, { id, listed: false, ask: null, listedAt: null, purged: false });
+  const escrow = new StandInEscrow(false);
+  const store = new MemoryStore();
+  let clock = Date.parse("2026-10-25T12:00:00Z");
+  const make = (asks: "default" | "fallback") => new Bridge({ ledger, venue, escrow, store, pid: PID, cid: CID, inbox: "utest1inbox", custodyKey: publicKey(custody), custodySecret: () => custody, maxItem: 10, binding: "listing", asks, now: () => new Date(clock) });
+  await make("default").openDeposit(3, publicKey(holder));
+  assert.equal(store.load().asks, "default", "the first ticket records the setting");
+  const fallback = make("fallback");
+  assert.throws(() => fallback.assertAsks([]), /uses the "default" asks and the config says "fallback".*open tickets: 3; in escrow: none/);
+  await assert.rejects(fallback.openDeposit(5, publicKey(holder)), /uses the "default" asks/);
+  clock += 25 * 3_600_000; // the ticket expires unused
+  assert.throws(() => fallback.assertAsks([4]), /open tickets: none; in escrow: 4/);
+  fallback.assertAsks([]); // nothing open, nothing marked: the change is recorded
+  assert.equal(store.load().asks, "fallback");
+  assert.match((await fallback.openDeposit(5, publicKey(holder))).ask, /^6666666\./);
+  make("fallback").assertAsks([]); // the same setting again: nothing to refuse
+
+  // the escrow book's holdings: received and not released since
+  const dir = mkdtempSync(join(tmpdir(), "bridge-"));
+  const book = new ManualEscrow(join(dir, "escrow.json"));
+  book.confirmReceived(4, HOLDER_ACCOUNT);
+  book.confirmReceived(5, HOLDER_ACCOUNT);
+  book.confirmReleased(5, HOLDER_ACCOUNT);
+  assert.deepEqual(book.held(), [4]);
+
+  // the CLI refuses before anything else runs, and says why
+  writeFileSync(join(dir, "state.json"), JSON.stringify({ deposits: {}, redemptions: {}, asks: "default" }));
+  const config = { ledger: "http://127.0.0.1:9", venue: "http://127.0.0.1:9", pid: PID, cid: CID, inbox: "utest1inbox", custodyKey: publicKey(custody), custodySecretFile: join(dir, "none.hex"), maxItem: 10, binding: "listing", asks: "fallback", state: join(dir, "state.json"), escrowBook: join(dir, "escrow.json") };
+  writeFileSync(join(dir, "config.json"), JSON.stringify(config));
+  const r = spawnSync(process.execPath, [fileURLToPath(new URL("../src/cli.ts", import.meta.url)), "proof"], { env: { ...process.env, BRIDGE_CONFIG: join(dir, "config.json") }, encoding: "utf8" });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /uses the "default" asks and the config says "fallback".*in escrow: 4/);
 });
