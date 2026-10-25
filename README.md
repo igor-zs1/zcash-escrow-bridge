@@ -3,8 +3,7 @@
 Bring a collectible held on a Zcash marketplace onto a shielded Zcash collections ledger as well, one for one, and
 take it back at any time.
 
-**An independent project, not affiliated with the zkSNARKs team or Zilk Road.** Built by the Sapling team
-([sapling.cash](https://sapling.cash)).
+**Built for zkSNARKs on Zilk Road.** Built by the Sapling team ([sapling.cash](https://sapling.cash)).
 
 Some Zcash collections are held and traded on their marketplace. This bridge gives each item a copy on a collections
 ledger that runs on Zcash itself, so its holder can also hold it under a key they control, move it with shielded memos,
