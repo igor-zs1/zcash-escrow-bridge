@@ -11,8 +11,7 @@ and trade it anywhere the ledger is used, while anyone can check the whole state
 The original sits in an escrow account at the marketplace for as long as its copy is out; the copy can be held, sold
 and transferred like any item on the ledger, and whoever holds it can redeem the original whenever they want.
 
-It was built for collections such as zkSNARKs, whose items are held and transferred on the Zilk Road marketplace. It
-is a community bridge: not made, run or endorsed by any collection's team or by the marketplace.
+It was built for zkSNARKs, whose items are held and transferred on the Zilk Road marketplace.
 
 ## How it works
 
