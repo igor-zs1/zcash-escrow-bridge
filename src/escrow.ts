@@ -14,6 +14,8 @@ export interface Escrow {
   sender(item: number): Promise<string | null>;
   /** send the item back to an account; resolves once it has left the escrow */
   release(item: number, to: string): Promise<void>;
+  /** true when release() itself sends the item (the bridge then marks a release as started before calling it) */
+  readonly sendsItself?: boolean;
 }
 
 type Book = { received: Record<string, { from: string | null; at: string }>; released: Record<string, { to: string; at: string }> };

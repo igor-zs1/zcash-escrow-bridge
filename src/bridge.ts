@@ -38,7 +38,17 @@ export type Deposit = {
   memo?: string;
 };
 /** `sq`: the copy's sequence number when its holder signed; the return must be that holder's next move (sq + 1) */
-export type Redemption = { item: number; to: string; holderKey: string; sq: number; sig: string; requestedAt: string; state: "requested" | "returned" | "released" };
+export type Redemption = {
+  item: number;
+  to: string;
+  holderKey: string;
+  sq: number;
+  sig: string;
+  requestedAt: string;
+  state: "requested" | "returned" | "released";
+  /** when an escrow that sends items itself was asked to send this one back (one release per redemption) */
+  releasingSince?: string;
+};
 /** `asks`: the asks setting the first ticket was opened with (venue.ts); it changes only while nothing is open (assertAsks) */
 type State = { deposits: Record<string, Deposit>; redemptions: Record<string, Redemption>; asks?: AsksName };
 
@@ -152,6 +162,12 @@ export class Bridge {
   }
   redemption(item: number): Redemption | null {
     return this.c.store.load().redemptions[item] ?? null;
+  }
+  /** every redemption under way (requested, or returned and not yet released), in item order */
+  openRedemptions(): Redemption[] {
+    return Object.values(this.c.store.load().redemptions)
+      .filter((r) => r.state === "requested" || r.state === "returned")
+      .sort((x, y) => x.item - y.item);
   }
   private itemOk(item: number): void {
     if (!Number.isSafeInteger(item) || item < 1 || item > this.c.maxItem) throw new Error(`no item #${item}`);
@@ -318,7 +334,22 @@ export class Bridge {
   async release(item: number): Promise<Redemption> {
     const r = this.redemption(item);
     if (!r || r.state !== "returned") throw new Error(`#${item} has no returned redemption`);
-    await this.c.escrow.release(item, r.to);
+    if (this.c.escrow.sendsItself) {
+      // one release per redemption: marked as started before the escrow sends, so a rerun after an interruption
+      // finishes it, and an item gone without a started release is a mismatch, never a second send
+      const held = await this.c.escrow.holds(item);
+      if (r.releasingSince === undefined) {
+        if (!held) throw new Error(`#${item} is not in the escrow, and no release of it was started: stop and check the escrow account`);
+        this.change((s) => {
+          s.redemptions[item]!.releasingSince = this.now().toISOString();
+        });
+        await this.c.escrow.release(item, r.to);
+      } else if (held) {
+        await this.c.escrow.release(item, r.to); // started before and not finished: the same item, the same account
+      }
+    } else {
+      await this.c.escrow.release(item, r.to);
+    }
     if (await this.c.escrow.holds(item)) throw new Error(`#${item} is still in the escrow`);
     return this.change((s) => {
       const x = s.redemptions[item]!;
@@ -328,4 +359,5 @@ export class Bridge {
       return x;
     });
   }
+
 }

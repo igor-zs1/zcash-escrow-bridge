@@ -14,6 +14,10 @@
  *   bridge escrow released <item>                                  the operator sent the original back
  *   bridge redeem release <item>                                   the redemption is done
  *   bridge proof [--attest]                                        the public backing proof (and the signed attestation)
+ *   bridge release due                                             automatic release: every redemption that is due goes
+ *                                                                  back, through the escrow account's own session
+ *                                                                  (escrowSessionFile, read only when acting; may be
+ *                                                                  /dev/stdin); prints one JSON event per redemption
  *
  * Holder (no config):
  *   bridge keygen <file>                                           a new Ed25519 key (secret to the file, 0600)
@@ -30,13 +34,15 @@ import { ed25519 } from "@noble/curves/ed25519";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils";
 import { Bridge, FileStore, redemptionDigest } from "./bridge.ts";
 import { ManualEscrow } from "./escrow.ts";
+import { releaseDue } from "./release.ts";
+import { ZilkRoadEscrow } from "./zilkroad.ts";
 import { HttpLedger } from "./ledger.ts";
 import { attest, backing } from "./proof.ts";
 import { publicKey, signTransfer } from "./transfer.ts";
 import { HttpVenue, type AsksName } from "./venue.ts";
 import { MESSAGE_ZAT, paymentUri } from "./zip321.ts";
 
-type Config = { ledger: string; venue: string; pid: string; cid: string; inbox: string; custodyKey: string; custodySecretFile: string; maxItem: number; binding: "sender" | "listing"; asks?: AsksName; state: string; escrowBook: string };
+type Config = { ledger: string; venue: string; pid: string; cid: string; inbox: string; custodyKey: string; custodySecretFile: string; maxItem: number; binding: "sender" | "listing"; asks?: AsksName; escrowAccount?: string; escrowBase?: string; escrowSessionFile?: string; state: string; escrowBook: string };
 
 const secretFrom = (path: string): Uint8Array => {
   const hex = readFileSync(path, "utf8").trim();
@@ -91,6 +97,16 @@ async function main(argv: string[]): Promise<void> {
     const secret = custodySecret();
     if (publicKey(secret) !== bridge.custodyKey) throw new Error("the custody secret given is not the custody key's: nothing signed");
     return out({ ...p, attestation: attest(p, secret) });
+  }
+  if (a === "release" && b === "due") {
+    if (!c.escrowAccount || !c.escrowSessionFile) throw new Error("automatic release needs escrowAccount and escrowSessionFile in the config");
+    let session: string | null = null; // read once, only when the escrow is first asked
+    const live = new ZilkRoadEscrow({ base: c.escrowBase ?? c.venue, account: c.escrowAccount, session: () => (session ??= readFileSync(c.escrowSessionFile!, "utf8").trim()) });
+    const auto = new Bridge({ ledger, venue, escrow: live, store: new FileStore(c.state), pid: c.pid, cid: c.cid, inbox: c.inbox, custodyKey: c.custodyKey, custodySecret: () => { throw new Error("automatic release never signs"); }, maxItem: c.maxItem, binding: c.binding, asks: c.asks });
+    const events = await releaseDue(auto, { recordReleased: (item, to) => escrow.confirmReleased(item, to) });
+    for (const e of events) out(e);
+    if (events.length === 0) out({ outcome: "idle", why: "no redemption is due", at: new Date().toISOString(), alert: false });
+    return;
   }
   switch (`${a} ${b}`) {
     case "deposit open": {
