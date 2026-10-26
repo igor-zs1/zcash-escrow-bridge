@@ -33,11 +33,11 @@ It was built for zkSNARKs, whose items are held and transferred on the Zilk Road
   block order; anyone can run the index and replay it.
 * **Deposit** (`src/bridge.ts`). The holder opens a deposit ticket naming the item and the key that will hold its copy.
   The deposit has to be bound to the person making it, or someone could open a ticket for an item they do not hold and
-  collect the copy when its real holder deposits: if the escrow's view shows who sent an item, the ticket names the
-  holder's account; if it does not, the holder first lists the item at the ticket's one-time challenge ask (8,888,888
-  ZEC and an 8 digit code), which only the item's holder can do, and the bridge sees it in the marketplace's public
-  API. The holder then transfers the item to the escrow account, the operator confirms it arrived, and the custody key
-  signs the issuance transfer.
+  collect the copy when its real holder deposits: the holder first lists the item at the ticket's one-time challenge
+  ask (8,888,888 ZEC and an 8 digit code), which only the item's holder can do, and the bridge sees it in the
+  marketplace's public API. Where the escrow's view also shows who sent an item (`"binding": "sender"`), the ticket
+  names the holder's account as well and the item must arrive from it. The holder then transfers the item to the escrow
+  account, the operator confirms it arrived, and the custody key signs the issuance transfer.
 * **Redemption.** The copy's holder signs a redemption naming the marketplace account the original goes back to, and
   transfers the copy back to custody. The return must be that holder's very next move on the copy, so a copy sold after
   its holder signed cannot send the original to the seller. Then the original leaves the escrow for the named account.
@@ -83,6 +83,7 @@ proof makes a breach visible; it cannot prevent one.
 | Custody key stolen | Copies still in custody could be issued unbacked: the key signs nothing but issuance, every issuance needs a confirmed deposit, and the proof shows an unbacked copy at once |
 | Redemption to a wrong account | Marketplace transfers are final: the account is signed by the holder, shown back in full and format checked |
 | Two claims on one deposit | One ticket per item at a time; the binding decides |
+| A deposit and a redemption of one item at once | Refused: a redemption under way (requested, or returned and not yet released) blocks any deposit of the item, and a deposit under way blocks a redemption |
 | Item burned at the marketplace | Its copy never leaves custody |
 
 ## Run it

@@ -95,7 +95,7 @@ async function main(argv: string[]): Promise<void> {
   switch (`${a} ${b}`) {
     case "deposit open": {
       const d = await bridge.openDeposit(item(), rest[1] ?? "", flag(rest, "--from"));
-      return out(d.binding === "listing" ? { ...d, todo: `list #${d.item} at ${d.ask} ZEC, then run: bridge deposit prove ${d.item}` } : { ...d, todo: `send #${d.item} from ${d.sender} to the escrow account` });
+      return out({ ...d, todo: `list #${d.item} at ${d.ask} ZEC, then run: bridge deposit prove ${d.item}${d.binding === "sender" ? `; then send #${d.item} from ${d.sender} to the escrow account` : ""}` });
     }
     case "deposit prove":
       return out(await bridge.proveListing(item()));

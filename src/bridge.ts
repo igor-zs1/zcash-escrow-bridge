@@ -3,8 +3,9 @@
  * back at any time. Every copy starts held by the custody key (the collection's reserve); issuing one is a transfer
  * from custody to the holder's key, and a redemption is the holder's transfer back.
  *
- * Deposit:    open → proven (listing binding only) → received → issuing → issued
+ * Deposit:    open → proven (the challenge listing, in both bindings) → received → issuing → issued
  * Redemption: requested → returned → released
+ * An item never has a deposit and a redemption under way at once.
  *
  * The invariant: every copy outside custody has its original in escrow (proof.ts checks it in public).
  */
@@ -25,7 +26,7 @@ const KEY = /^[0-9a-f]{64}$/;
 export type Deposit = {
   item: number;
   holderKey: string;
-  /** how the deposit is bound to its depositor: the escrow shows the sender, or the holder proved control by a listing */
+  /** how the deposit is bound to its depositor: always the holder's challenge listing; "sender" also checks the sending account */
   binding: "sender" | "listing";
   sender: string | null;
   code: string;
@@ -94,7 +95,7 @@ export type BridgeConfig = {
   custodySecret: () => Uint8Array;
   /** item ids run 1 … maxItem; the copy of item N is token N */
   maxItem: number;
-  /** "sender" when the escrow's view shows who sent an item, else "listing" */
+  /** "sender" when the escrow's view shows who sent an item (checked on top of the challenge listing), else "listing" */
   binding: "sender" | "listing";
   /** the challenge and marker asks by name (venue.ts; "default" when left out) */
   asks?: AsksName;
@@ -155,10 +156,28 @@ export class Bridge {
   private itemOk(item: number): void {
     if (!Number.isSafeInteger(item) || item < 1 || item > this.c.maxItem) throw new Error(`no item #${item}`);
   }
+  /** a redemption under way: requested, or its copy returned and the original not yet released */
+  private redemptionInFlight(item: number): Redemption | null {
+    const r = this.redemption(item);
+    return r && (r.state === "requested" || r.state === "returned") ? r : null;
+  }
+  /** a deposit under way: received or issuing, or opened or proven and not expired */
+  private depositInFlight(item: number): Deposit | null {
+    const d = this.deposit(item);
+    if (!d) return null;
+    if (d.state === "received" || d.state === "issuing") return d;
+    return (d.state === "open" || d.state === "proven") && Date.parse(d.expiresAt) > this.now().getTime() ? d : null;
+  }
+  /** One item never has a deposit and a redemption under way at once. */
+  private noRedemptionInFlight(item: number): void {
+    const r = this.redemptionInFlight(item);
+    if (r) throw new Error(`#${item} has a redemption under way (${r.state}): it is released before any deposit of #${item}`);
+  }
 
   /** A deposit ticket: the item, the key that will hold its copy, and how the deposit is bound to the depositor. */
   async openDeposit(item: number, holderKey: string, sender: string | null = null): Promise<Deposit> {
     this.itemOk(item);
+    this.noRedemptionInFlight(item);
     if (!KEY.test(holderKey) || holderKey === this.custodyKey) throw new Error("the holder key is an Ed25519 public key in hex, not the custody key");
     if (this.c.binding === "sender" && (sender === null || !ACCOUNT_ID.test(sender))) throw new Error("name the account the item will come from");
     const v = await this.c.venue.item(item);
@@ -188,10 +207,10 @@ export class Bridge {
     return d;
   }
 
-  /** Listing binding: the item is listed at this ticket's challenge ask, after the ticket opened. */
+  /** The holder's proof, in both bindings: the item is listed at this ticket's challenge ask, after the ticket opened. */
   async proveListing(item: number): Promise<Deposit> {
     const d = this.deposit(item);
-    if (!d || d.state !== "open" || d.binding !== "listing") throw new Error(`#${item} has no deposit waiting for its listing proof`);
+    if (!d || d.state !== "open") throw new Error(`#${item} has no deposit waiting for its listing proof`);
     if (Date.parse(d.expiresAt) <= this.now().getTime()) throw new Error("the deposit ticket expired");
     const v = await this.c.venue.item(item);
     if (!v?.listed || !sameAsk(v.ask, d.ask) || !v.listedAt || Date.parse(v.listedAt) < Date.parse(d.openedAt)) throw new Error(`#${item} is not listed at ${d.ask} since the ticket opened`);
@@ -206,7 +225,10 @@ export class Bridge {
   /** The escrow holds the item, from the bound depositor. */
   async confirmReceived(item: number): Promise<Deposit> {
     const d = this.deposit(item);
-    if (!d || !(d.state === "proven" || (d.state === "open" && d.binding === "sender"))) throw new Error(`#${item} has no deposit ready to receive`);
+    // every deposit proves its holder by the challenge listing first, sender binding too: an account named by someone
+    // else never gets its item issued to their key
+    if (!d || d.state !== "proven") throw new Error(`#${item} has no deposit ready to receive (its challenge listing proves the holder first)`);
+    this.noRedemptionInFlight(item);
     if (!(await this.c.escrow.holds(item))) throw new Error(`the escrow does not hold #${item}`);
     if (d.binding === "sender" && (await this.c.escrow.sender(item)) !== d.sender) throw new Error(`#${item} did not come from ${d.sender}`);
     return this.change((s) => {
@@ -220,6 +242,7 @@ export class Bridge {
   async issue(item: number): Promise<{ deposit: Deposit; payment: Payment }> {
     const d = this.deposit(item);
     if (!d || !(d.state === "received" || d.state === "issuing")) throw new Error(`#${item} has no received deposit`);
+    this.noRedemptionInFlight(item);
     if (!(await this.c.escrow.holds(item))) throw new Error(`the escrow no longer holds #${item}`);
     const t = await this.c.ledger.token(this.cid8, item);
     if (!t) throw new Error(`no copy #${item} on the ledger`);
@@ -256,6 +279,8 @@ export class Bridge {
   async requestRedemption(item: number, to: string, sig: string): Promise<Redemption> {
     this.itemOk(item);
     if (!ACCOUNT_ID.test(to)) throw new Error("not an account id (ZR-XXXX-XXXX)");
+    const open = this.depositInFlight(item);
+    if (open) throw new Error(`#${item} has a deposit under way (${open.state}): no redemption of #${item} until it is issued or expired`);
     const t = await this.c.ledger.token(this.cid8, item);
     if (!t || t.holder === this.custodyKey || !KEY.test(t.holder)) throw new Error(`copy #${item} is not out of custody`);
     if (!(await this.c.escrow.holds(item))) throw new Error(`the escrow does not hold #${item}`);

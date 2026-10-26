@@ -66,14 +66,33 @@ test("a deposit by listing proof, issued to the holder's key, and its redemption
   assert.equal((await bridge.openDeposit(4, publicKey(buyer))).state, "open");
 });
 
-test("a deposit bound to the sender's account takes the item only from that account", async () => {
-  const { escrow, bridge } = world("sender");
+test("a deposit bound to the sender's account proves its holder by the challenge listing too, then takes the item only from that account", async () => {
+  const { venue, escrow, bridge, tick, at } = world("sender");
   await assert.rejects(bridge.openDeposit(2, publicKey(holder)), /name the account/);
-  await bridge.openDeposit(2, publicKey(holder), HOLDER_ACCOUNT);
+  const d = await bridge.openDeposit(2, publicKey(holder), HOLDER_ACCOUNT);
+  escrow.receive(2, HOLDER_ACCOUNT);
+  await assert.rejects(bridge.confirmReceived(2), /challenge listing proves the holder first/, "no receipt before the listing proof, in sender binding too");
+  tick();
+  venue.list(2, d.ask, at());
+  assert.equal((await bridge.proveListing(2)).state, "proven");
+  venue.delist(2);
   escrow.receive(2, "ZR-CCCC-DDDD");
   await assert.rejects(bridge.confirmReceived(2), /did not come from ZR-AAAA-BBBB/);
   escrow.receive(2, HOLDER_ACCOUNT);
   assert.equal((await bridge.confirmReceived(2)).state, "received");
+});
+
+test("sender binding: a ticket naming someone else's account never issues their item to another key", async () => {
+  const { ledger, escrow, bridge, tick } = world("sender");
+  // the attacker opens a ticket for the victim's #5, naming the victim's account and the attacker's own key
+  await bridge.openDeposit(5, publicKey(buyer), HOLDER_ACCOUNT);
+  tick();
+  await assert.rejects(bridge.proveListing(5), /is not listed at/, "only the item's holder can list it at the ticket's challenge ask");
+  // the victim's item arrives from the victim's account: it still does not count for the attacker's ticket
+  escrow.receive(5, HOLDER_ACCOUNT);
+  await assert.rejects(bridge.confirmReceived(5), /challenge listing proves the holder first/);
+  await assert.rejects(bridge.issue(5), /has no received deposit/);
+  assert.equal((await ledger.token(bridge.cid8, 5))?.holder, bridge.custodyKey, "the copy stays in custody");
 });
 
 test("a deposit is refused for an item that does not exist, was burned, or whose copy is out, and while one is open", async () => {
@@ -123,6 +142,9 @@ test("a redemption must be signed by the copy's holder, and its return must be t
   escrow.receive(7, HOLDER_ACCOUNT);
   await bridge.confirmReceived(7);
   ledger.apply((await bridge.issue(7)).payment.memo!);
+  // until the operator confirms the issuance (deposit check), the deposit is still under way: no redemption yet
+  await assert.rejects(bridge.requestRedemption(7, HOLDER_ACCOUNT, redeemSig(holder, 7, HOLDER_ACCOUNT)), /deposit under way \(issuing\)/);
+  await bridge.confirmIssued(7);
   await assert.rejects(bridge.requestRedemption(7, HOLDER_ACCOUNT, redeemSig(buyer, 7, HOLDER_ACCOUNT)), /not signed by the copy's holder/);
   await assert.rejects(bridge.requestRedemption(7, "ZR-bad", redeemSig(holder, 7, "ZR-bad")), /not an account id/);
   await bridge.requestRedemption(7, HOLDER_ACCOUNT, redeemSig(holder, 7, HOLDER_ACCOUNT));
@@ -156,10 +178,12 @@ test("the custody secret is read only to sign an issuance, and a wrong one signs
   let reads = 0;
   let secret = new Uint8Array(32).fill(7); // not the custody key's
   const bridge = new Bridge({ ledger, venue, escrow, store: new MemoryStore(), pid: PID, cid: CID, inbox: "utest1inbox", custodyKey: publicKey(custody), custodySecret: () => (reads++, secret), maxItem: 10, binding: "sender" });
-  await bridge.openDeposit(2, publicKey(holder), HOLDER_ACCOUNT);
+  const d2 = await bridge.openDeposit(2, publicKey(holder), HOLDER_ACCOUNT);
+  venue.list(2, d2.ask, new Date(Date.now() + 1000).toISOString());
+  await bridge.proveListing(2);
   escrow.receive(2, HOLDER_ACCOUNT);
   await bridge.confirmReceived(2);
-  assert.equal(reads, 0, "opening and receiving a deposit never reads the secret");
+  assert.equal(reads, 0, "opening, proving and receiving a deposit never read the secret");
   await assert.rejects(bridge.issue(2), /not the custody key's: nothing signed/);
   assert.equal((await ledger.token(bridge.cid8, 2))?.holder, publicKey(custody));
   secret = custody;
@@ -228,4 +252,57 @@ test("the asks setting cannot change while a ticket is open or the escrow marks 
   const r = spawnSync(process.execPath, [fileURLToPath(new URL("../src/cli.ts", import.meta.url)), "proof"], { env: { ...process.env, BRIDGE_CONFIG: join(dir, "config.json") }, encoding: "utf8" });
   assert.equal(r.status, 1);
   assert.match(r.stderr, /uses the "default" asks and the config says "fallback".*in escrow: 4/);
+});
+
+test("an item never has a deposit and a redemption under way at once", async () => {
+  const { ledger, venue, escrow, bridge, tick, at } = world("listing");
+  const deposit = async (item: number, key: Uint8Array) => {
+    const d = await bridge.openDeposit(item, publicKey(key));
+    tick();
+    venue.list(item, d.ask, at());
+    await bridge.proveListing(item);
+    venue.delist(item);
+    escrow.receive(item, HOLDER_ACCOUNT);
+    await bridge.confirmReceived(item);
+    venue.list(item, MARKER_ASK, at());
+    const { payment } = await bridge.issue(item);
+    assert.equal(ledger.apply(payment.memo!), null);
+    await bridge.confirmIssued(item);
+  };
+  await deposit(4, holder);
+  await bridge.requestRedemption(4, HOLDER_ACCOUNT, redeemSig(holder, 4, HOLDER_ACCOUNT));
+  await assert.rejects(bridge.openDeposit(4, publicKey(buyer)), /redemption under way \(requested\)/);
+  const t = (await ledger.token(bridge.cid8, 4))!;
+  assert.equal(ledger.apply(signTransfer({ pid: PID, cid: CID, id: 4, sq: t.sq, to: bridge.custodyKey, secret: holder })), null);
+  await bridge.confirmReturned(4);
+  // the copy is back in custody and the original still in escrow: the double-issue window, now closed
+  await assert.rejects(bridge.openDeposit(4, publicKey(buyer)), /redemption under way \(returned\): it is released before any deposit/);
+  venue.delist(4);
+  await bridge.release(4);
+  const again = await bridge.openDeposit(4, publicKey(buyer)); // released: a new deposit of #4 is fine
+  assert.equal(again.state, "open");
+});
+
+test("the in-flight guard holds in every direction, whatever state was written", async () => {
+  const ledger = new MemoryLedger(PID, CID);
+  ledger.reserve(11, publicKey(custody));
+  const venue = new MemoryVenue();
+  for (let id = 1; id <= 10; id++) venue.byId.set(id, { id, listed: false, ask: null, listedAt: null, purged: false });
+  const escrow = new StandInEscrow(false);
+  const store = new MemoryStore();
+  const clock = Date.parse("2026-10-25T12:00:00Z");
+  const bridge = new Bridge({ ledger, venue, escrow, store, pid: PID, cid: CID, inbox: "utest1inbox", custodyKey: publicKey(custody), custodySecret: () => custody, maxItem: 10, binding: "listing", now: () => new Date(clock) });
+  const iso = (ms: number) => new Date(clock + ms).toISOString();
+  const dep = (item: number, state: string) => ({ item, holderKey: publicKey(holder), binding: "listing", sender: null, code: "00000001", ask: "8888888.00000001", openedAt: iso(-60_000), expiresAt: iso(3_600_000), state });
+  const red = (item: number, state: string) => ({ item, to: HOLDER_ACCOUNT, holderKey: publicKey(holder), sq: 1, sig: "00".repeat(64), requestedAt: iso(-30_000), state });
+  // a proven deposit and a returned redemption of #7 at once (as a crash or an operator's hand could leave them)
+  store.save({ deposits: { 7: dep(7, "proven"), 8: dep(8, "received"), 9: dep(9, "open") }, redemptions: { 7: red(7, "returned"), 8: red(8, "requested") } } as never);
+  escrow.receive(7, HOLDER_ACCOUNT);
+  escrow.receive(8, HOLDER_ACCOUNT);
+  await assert.rejects(bridge.confirmReceived(7), /redemption under way \(returned\)/);
+  await assert.rejects(bridge.issue(8), /redemption under way \(requested\)/);
+  // a deposit under way blocks a redemption, even with its copy out
+  ledger.byId.set(9, { cid8: bridge.cid8, id: 9, holder: publicKey(holder), sq: 1 });
+  escrow.receive(9, HOLDER_ACCOUNT);
+  await assert.rejects(bridge.requestRedemption(9, HOLDER_ACCOUNT, redeemSig(holder, 9, HOLDER_ACCOUNT)), /deposit under way \(open\)/);
 });
