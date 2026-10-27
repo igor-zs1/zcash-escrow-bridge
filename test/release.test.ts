@@ -22,6 +22,9 @@ class FakeVenue {
   cancels: string[] = [];
   offline = false;
   dropAfterTransfer = false; // the transfer happens, its answer is lost
+  refuseNextTransfer = 0; // the next transfer is answered with this status and not acted on (403: a challenge page)
+  serverErrorNextTransfer = false; // the next transfer is answered 502 and not acted on (the bridge cannot know that)
+  onCancel?: () => void;
   account(id: string) {
     if (!this.accounts.has(id)) this.accounts.set(id, { snarks: [], listings: [], canTransfer: true });
     return this.accounts.get(id)!;
@@ -47,9 +50,19 @@ class FakeVenue {
     if (init?.method === "POST" && cancel) {
       a.listings = a.listings.filter((l) => l.id !== decodeURIComponent(cancel[1]!));
       this.cancels.push(decodeURIComponent(cancel[1]!));
+      this.onCancel?.();
       return json(200, { ok: true });
     }
     if (init?.method === "POST" && u.pathname === "/api/market/transfers") {
+      if (this.refuseNextTransfer) {
+        const code = this.refuseNextTransfer;
+        this.refuseNextTransfer = 0;
+        return new Response("<!doctype html><title>Just a moment...</title>", { status: code, headers: { "content-type": "text/html" } });
+      }
+      if (this.serverErrorNextTransfer) {
+        this.serverErrorNextTransfer = false;
+        return json(502, { error: "bad gateway" });
+      }
       const b = JSON.parse(String(init.body)) as { snarkId: string; toAccountId: string };
       const s = a.snarks.find((x) => x.id === b.snarkId);
       if (!s) return json(400, { error: "you do not hold this zkSNARK" });
@@ -122,7 +135,7 @@ test("a session that is not the escrow account's, or an account that cannot tran
   const f = await frozen.run();
   assert.match(f[0]!.why, /cannot transfer right now/);
   assert.equal(frozen.venue.transfers.length, 0);
-  assert.equal(frozen.bridge.redemption(4)?.releasingSince !== undefined, true, "the release was started, and the next run picks it up");
+  assert.equal(frozen.bridge.redemption(4)?.releasingSince, undefined, "refused before the transfer: certain nothing was sent, so the next run sends it");
   frozen.venue.account(ESCROW).canTransfer = true;
   assert.deepEqual((await frozen.run()).map((x) => x.outcome), ["released"]);
   assert.equal(frozen.venue.transfers.length, 1);
@@ -165,4 +178,58 @@ test("the escrow adapter sends only a held item, only to another well formed acc
   assert.throws(() => new ZilkRoadEscrow({ base: "x", account: "nope", session: () => "" }), /account id/);
   assert.equal(w.reads(), 0, "building the bridge reads no session");
   assert.equal(w.venue.transfers.length, 0);
+});
+
+test("a lost answer with the item back in the escrow is never sent again: the run stops until a person resolves it", async () => {
+  const w = world();
+  w.venue.dropAfterTransfer = true;
+  assert.deepEqual((await w.run()).map((e) => e.outcome), ["held"]);
+  assert.equal(w.venue.transfers.length, 1);
+  w.venue.give(ESCROW, 4); // the item comes back to the escrow before the next run, by someone else
+  const e = await w.run();
+  assert.deepEqual(e.map((x) => [x.outcome, x.alert]), [["stopped", true]]);
+  assert.match(e[0]!.why, /was started and may have been sent.*bridge release resolve 4 sent\|not-sent/);
+  assert.deepEqual((await w.run()).map((x) => x.outcome), ["stopped"], "it stays stopped, run after run");
+  assert.equal(w.venue.transfers.length, 1, "never sent twice");
+  w.bridge.resolveRelease(4, true); // the escrow account's transfers show the first one went through
+  assert.equal(w.bridge.redemption(4)?.state, "released");
+  assert.deepEqual(await w.run(), []);
+  assert.equal(w.venue.transfers.length, 1);
+  assert.throws(() => w.bridge.resolveRelease(4, false), /no started release to resolve/);
+});
+
+test("a transfer the venue refuses (its protection's challenge page) was not sent: the next run sends it once", async () => {
+  const w = world();
+  w.venue.refuseNextTransfer = 403;
+  const e = await w.run();
+  assert.deepEqual(e.map((x) => [x.outcome, x.alert]), [["stopped", true]]);
+  assert.match(e[0]!.why, /refused POST \/market\/transfers \(403\)/);
+  assert.equal(w.venue.transfers.length, 0);
+  assert.ok(w.venue.holds(ESCROW, 4) && w.venue.account(ESCROW).listings.length === 0, "delisted, still held: the backing proof shows it");
+  assert.equal(w.bridge.redemption(4)?.releasingSince, undefined);
+  assert.deepEqual((await w.run()).map((x) => x.outcome), ["released"]);
+  assert.deepEqual(w.venue.transfers, [{ snarkId: "snark-4", toAccountId: HOME }]);
+});
+
+test("a server error on the transfer may have sent it: the release stays started and is never resent until resolved", async () => {
+  const w = world();
+  w.venue.serverErrorNextTransfer = true;
+  assert.deepEqual((await w.run()).map((x) => [x.outcome, x.alert]), [["stopped", true]]);
+  assert.notEqual(w.bridge.redemption(4)?.releasingSince, undefined);
+  const e = await w.run();
+  assert.match(e[0]!.why, /may have been sent/);
+  assert.equal(w.venue.transfers.length, 0);
+  w.bridge.resolveRelease(4, false); // the escrow account's transfers show none went out
+  assert.deepEqual((await w.run()).map((x) => x.outcome), ["released"]);
+  assert.equal(w.venue.transfers.length, 1);
+});
+
+test("the session is checked again right before the transfer: one that changed account sends nothing", async () => {
+  const w = world();
+  w.venue.onCancel = () => w.venue.sessions.set("zr_session=escrow", "ZR-OTHR-0002");
+  const e = await w.run();
+  assert.deepEqual(e.map((x) => [x.outcome, x.alert]), [["stopped", true]]);
+  assert.match(e[0]!.why, /not the escrow account's/);
+  assert.equal(w.venue.transfers.length, 0);
+  assert.equal(w.bridge.redemption(4)?.releasingSince, undefined, "refused before the transfer");
 });

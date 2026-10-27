@@ -10,7 +10,7 @@
  * Every action checks first that the session is the escrow account's, that the account may transfer, and that it holds
  * the exact item; a release moves only that item, only to the named account, and checks afterwards that it has left.
  */
-import { ACCOUNT_ID, type Escrow } from "./escrow.ts";
+import { ACCOUNT_ID, notSent, type Escrow } from "./escrow.ts";
 
 type Me = {
   accountId: string;
@@ -19,8 +19,10 @@ type Me = {
   listings: { id: string; snarkId: string }[];
 };
 
-/** the venue could not be reached (the route is down): nothing happened, try again later */
+/** the venue could not be reached (the route is down): no answer came, so a request may or may not have been acted on */
 export class VenueUnreachable extends Error {}
+/** the venue answered with a refusal (4xx, its protection's challenge included): the request was not acted on */
+export class VenueRefused extends Error {}
 
 export type ZilkRoadEscrowConfig = {
   /** the marketplace, for example https://zilkroad.com */
@@ -54,7 +56,8 @@ export class ZilkRoadEscrow implements Escrow {
     } catch {
       throw new VenueUnreachable(`the venue could not be reached for ${method} ${path}`);
     }
-    if (r.status === 401) throw new Error("the escrow session has ended: the account holder signs in again");
+    if (r.status === 401) throw new VenueRefused("the escrow session has ended: the account holder signs in again");
+    if (r.status >= 400 && r.status < 500) throw new VenueRefused(`the venue refused ${method} ${path} (${r.status})`);
     if (!r.ok) throw new Error(`the venue answered ${r.status} to ${method} ${path}`);
     return r.json();
   }
@@ -79,17 +82,32 @@ export class ZilkRoadEscrow implements Escrow {
     return null;
   }
 
-  /** Delist the exact item if listed, transfer it to the exact account, and check it has left. */
+  /**
+   * Delist the exact item if listed, transfer it to the exact account, and check it has left. Every failure before the
+   * transfer request, and a transfer the venue refused, is marked notSent; a transfer with no answer (or a server
+   * error) is not, since the item may have gone.
+   */
   async release(item: number, to: string): Promise<void> {
-    if (!Number.isSafeInteger(item) || item < 1) throw new Error(`no item #${item}`);
-    if (!ACCOUNT_ID.test(to)) throw new Error("not an account id (ZR-XXXX-XXXX)");
-    if (to === this.c.account) throw new Error("a release never goes to the escrow account itself");
-    const m = await this.me();
-    if (!m.canTransfer) throw new Error("the escrow account cannot transfer right now");
-    const s = ZilkRoadEscrow.held(m, item);
-    if (!s) throw new Error(`the escrow does not hold #${item}`);
-    for (const l of m.listings.filter((l) => l.snarkId === s.id)) await this.call("POST", `/market/listings/${encodeURIComponent(l.id)}/cancel`);
-    await this.call("POST", "/market/transfers", { snarkId: s.id, toAccountId: to });
+    let sending = false;
+    try {
+      if (!Number.isSafeInteger(item) || item < 1) throw new Error(`no item #${item}`);
+      if (!ACCOUNT_ID.test(to)) throw new Error("not an account id (ZR-XXXX-XXXX)");
+      if (to === this.c.account) throw new Error("a release never goes to the escrow account itself");
+      const m = await this.me();
+      if (!m.canTransfer) throw new Error("the escrow account cannot transfer right now");
+      const s = ZilkRoadEscrow.held(m, item);
+      if (!s) throw new Error(`the escrow does not hold #${item}`);
+      for (const l of m.listings.filter((l) => l.snarkId === s.id)) await this.call("POST", `/market/listings/${encodeURIComponent(l.id)}/cancel`);
+      // checked again right before the transfer: still the escrow's session, still allowed, still the same item
+      const n = await this.me();
+      if (!n.canTransfer) throw new Error("the escrow account cannot transfer right now");
+      if (ZilkRoadEscrow.held(n, item)?.id !== s.id) throw new Error(`#${item} changed in the escrow during the release`);
+      sending = true;
+      await this.call("POST", "/market/transfers", { snarkId: s.id, toAccountId: to });
+    } catch (e) {
+      if (!sending || e instanceof VenueRefused) throw notSent(e as Error);
+      throw e;
+    }
     if (ZilkRoadEscrow.held(await this.me(), item)) throw new Error(`#${item} is still in the escrow after the transfer`);
   }
 }

@@ -18,6 +18,10 @@
  *                                                                  back, through the escrow account's own session
  *                                                                  (escrowSessionFile, read only when acting; may be
  *                                                                  /dev/stdin); prints one JSON event per redemption
+ *   bridge release resolve <item> sent|not-sent                    settles a started release that stopped with its item
+ *                                                                  in the escrow, from the escrow account's transfers:
+ *                                                                  sent (recorded, nothing sent) or not-sent (sent on
+ *                                                                  the next run)
  *
  * Holder (no config):
  *   bridge keygen <file>                                           a new Ed25519 key (secret to the file, 0600)
@@ -138,6 +142,13 @@ async function main(argv: string[]): Promise<void> {
     }
     case "redeem release":
       return out(await bridge.release(item()));
+    case "release resolve": {
+      const how = rest[1];
+      if (how !== "sent" && how !== "not-sent") throw new Error("bridge release resolve <item> sent|not-sent");
+      const r = bridge.resolveRelease(item(), how === "sent");
+      if (how === "sent") escrow.confirmReleased(r.item, r.to);
+      return out({ item: r.item, state: r.state, ...(how === "sent" ? { releasedTo: r.to } : { todo: "the next release run sends it" }) });
+    }
     default:
       throw new Error("unknown command (see the header of src/cli.ts)");
   }

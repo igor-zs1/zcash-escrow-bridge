@@ -14,7 +14,7 @@ import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { ed25519 } from "@noble/curves/ed25519";
 import { blake2b } from "@noble/hashes/blake2b";
 import { hexToBytes, utf8ToBytes } from "@noble/hashes/utils";
-import { ACCOUNT_ID, type Escrow } from "./escrow.ts";
+import { ACCOUNT_ID, wasNotSent, type Escrow } from "./escrow.ts";
 import type { Ledger } from "./ledger.ts";
 import { publicKey, signTransfer } from "./transfer.ts";
 import { asksNamed, challengeAsk, sameAsk, type Asks, type AsksName, type Venue } from "./venue.ts";
@@ -46,7 +46,10 @@ export type Redemption = {
   sig: string;
   requestedAt: string;
   state: "requested" | "returned" | "released";
-  /** when an escrow that sends items itself was asked to send this one back (one release per redemption) */
+  /**
+   * when an escrow that sends items itself was asked to send this one back (one release per redemption); cleared only
+   * when the escrow is certain nothing was sent, so a release still started may have sent the item
+   */
   releasingSince?: string;
 };
 /** `asks`: the asks setting the first ticket was opened with (venue.ts); it changes only while nothing is open (assertAsks) */
@@ -335,22 +338,52 @@ export class Bridge {
     const r = this.redemption(item);
     if (!r || r.state !== "returned") throw new Error(`#${item} has no returned redemption`);
     if (this.c.escrow.sendsItself) {
-      // one release per redemption: marked as started before the escrow sends, so a rerun after an interruption
-      // finishes it, and an item gone without a started release is a mismatch, never a second send
+      // one release per redemption: marked as started before the escrow sends, and unmarked only when the escrow is
+      // certain nothing was sent. A started release whose item is gone finishes; one whose item is in the escrow may
+      // have sent it already (an answer lost, the item back since), so it never sends again on its own
       const held = await this.c.escrow.holds(item);
       if (r.releasingSince === undefined) {
         if (!held) throw new Error(`#${item} is not in the escrow, and no release of it was started: stop and check the escrow account`);
         this.change((s) => {
           s.redemptions[item]!.releasingSince = this.now().toISOString();
         });
-        await this.c.escrow.release(item, r.to);
+        try {
+          await this.c.escrow.release(item, r.to);
+        } catch (e) {
+          if (wasNotSent(e)) {
+            this.change((s) => {
+              delete s.redemptions[item]!.releasingSince;
+            });
+          }
+          throw e;
+        }
       } else if (held) {
-        await this.c.escrow.release(item, r.to); // started before and not finished: the same item, the same account
+        throw new Error(`a release of #${item} to ${r.to} was started and may have been sent, and #${item} is in the escrow now: check the escrow account's transfers, then run: bridge release resolve ${item} sent|not-sent`);
       }
     } else {
       await this.c.escrow.release(item, r.to);
     }
     if (await this.c.escrow.holds(item)) throw new Error(`#${item} is still in the escrow`);
+    return this.released(item);
+  }
+
+  /**
+   * A person settles a started release that stopped because its item is in the escrow: "sent" when the escrow account's
+   * transfers show the first one went through (recorded as released, nothing is sent), "not-sent" when they show it did
+   * not (the next run sends it).
+   */
+  resolveRelease(item: number, sent: boolean): Redemption {
+    const r = this.redemption(item);
+    if (!r || r.state !== "returned" || r.releasingSince === undefined) throw new Error(`#${item} has no started release to resolve`);
+    if (sent) return this.released(item);
+    return this.change((s) => {
+      const x = s.redemptions[item]!;
+      delete x.releasingSince;
+      return x;
+    });
+  }
+
+  private released(item: number): Redemption {
     return this.change((s) => {
       const x = s.redemptions[item]!;
       x.state = "released";

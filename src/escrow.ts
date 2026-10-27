@@ -7,6 +7,12 @@ import { readFileSync, renameSync, writeFileSync } from "node:fs";
 
 export const ACCOUNT_ID = /^ZR-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
 
+/** Marks an error from release() as certain that nothing was sent (refused before the transfer, or the transfer refused). */
+export function notSent<E extends Error>(e: E): E {
+  return Object.assign(e, { notSent: true });
+}
+export const wasNotSent = (e: unknown): boolean => (e as { notSent?: unknown } | null)?.notSent === true;
+
 export interface Escrow {
   /** whether the escrow account holds the item now */
   holds(item: number): Promise<boolean>;
@@ -14,7 +20,11 @@ export interface Escrow {
   sender(item: number): Promise<string | null>;
   /** send the item back to an account; resolves once it has left the escrow */
   release(item: number, to: string): Promise<void>;
-  /** true when release() itself sends the item (the bridge then marks a release as started before calling it) */
+  /**
+   * true when release() itself sends the item. The bridge then marks a release as started before calling it, and a
+   * release() that fails must mark its error with notSent() when it is certain the item was not sent: any other
+   * failure leaves the release started, and a started release never sends again on its own.
+   */
   readonly sendsItself?: boolean;
 }
 
