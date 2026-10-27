@@ -21,7 +21,10 @@ type Me = {
 
 /** the venue could not be reached (the route is down): no answer came, so a request may or may not have been acted on */
 export class VenueUnreachable extends Error {}
-/** the venue answered with a refusal (4xx, its protection's challenge included): the request was not acted on */
+/**
+ * the venue answered 400, 401 or 403 (its protection's challenge included): a request it rejects before acting on it.
+ * Any other 4xx is not taken as proof the request was not acted on.
+ */
 export class VenueRefused extends Error {}
 
 export type ZilkRoadEscrowConfig = {
@@ -57,7 +60,7 @@ export class ZilkRoadEscrow implements Escrow {
       throw new VenueUnreachable(`the venue could not be reached for ${method} ${path}`);
     }
     if (r.status === 401) throw new VenueRefused("the escrow session has ended: the account holder signs in again");
-    if (r.status >= 400 && r.status < 500) throw new VenueRefused(`the venue refused ${method} ${path} (${r.status})`);
+    if (r.status === 400 || r.status === 403) throw new VenueRefused(`the venue refused ${method} ${path} (${r.status})`);
     if (!r.ok) throw new Error(`the venue answered ${r.status} to ${method} ${path}`);
     return r.json();
   }
@@ -84,8 +87,8 @@ export class ZilkRoadEscrow implements Escrow {
 
   /**
    * Delist the exact item if listed, transfer it to the exact account, and check it has left. Every failure before the
-   * transfer request, and a transfer the venue refused, is marked notSent; a transfer with no answer (or a server
-   * error) is not, since the item may have gone.
+   * transfer request, and a transfer the venue refused outright (400, 401, 403), is marked notSent; a transfer with no
+   * answer, any other 4xx or a server error is not, since the item may have gone.
    */
   async release(item: number, to: string): Promise<void> {
     let sending = false;

@@ -233,3 +233,19 @@ test("the session is checked again right before the transfer: one that changed a
   assert.equal(w.venue.transfers.length, 0);
   assert.equal(w.bridge.redemption(4)?.releasingSince, undefined, "refused before the transfer");
 });
+
+test("any other 4xx on the transfer may have sent it: the release stays started and is never resent until resolved", async () => {
+  for (const code of [409, 429]) {
+    const w = world();
+    w.venue.refuseNextTransfer = code;
+    const e = await w.run();
+    assert.deepEqual(e.map((x) => [x.outcome, x.alert]), [["stopped", true]]);
+    assert.match(e[0]!.why, new RegExp(`answered ${code} to POST /market/transfers`));
+    assert.notEqual(w.bridge.redemption(4)?.releasingSince, undefined, `${code}: not taken as not sent`);
+    assert.match((await w.run())[0]!.why, /may have been sent/);
+    assert.equal(w.venue.transfers.length, 0);
+    w.bridge.resolveRelease(4, false);
+    assert.deepEqual((await w.run()).map((x) => x.outcome), ["released"]);
+    assert.equal(w.venue.transfers.length, 1);
+  }
+});
