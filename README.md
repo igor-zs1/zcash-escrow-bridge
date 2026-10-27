@@ -42,6 +42,40 @@ It was built for zkSNARKs, whose items are held and transferred on the Zilk Road
   transfers the copy back to custody. The return must be that holder's very next move on the copy, so a copy sold after
   its holder signed cannot send the original to the seller. Then the original leaves the escrow for the named account.
 
+## Automatic release
+
+Nobody sends a redeemed original back by hand. The bridge works the escrow account itself, through that account's own
+signed-in session at the marketplace (`src/zilkroad.ts`), and `bridge release due` runs on a timer:
+
+1. For every redemption that was signed, it checks the ledger: is the copy back in custody, as that holder's very next
+   move? Not yet: it waits. Moved some other way: the run stops and says so.
+2. For every redemption whose copy is back, the escrow delists the exact item, transfers it to the exact account the
+   holder signed for, and checks it has left. One item, one account, one release per redemption.
+
+Each run prints one line per redemption: `released`, `waiting`, `held` or `stopped`, and why. `held` means nothing
+happened and the next run tries again: the marketplace could not be reached, or the escrow account's session has
+ended and the account holder signs in again. `stopped` means something did not match and nothing further is released
+until a person has looked.
+
+The session is used only for what a release needs: reading the account, delisting and transferring. It never creates
+or reprices a listing, never accepts an offer, and the bridge never prints or stores it. The command is given the
+session on its input (`escrowSessionFile`, which may be `/dev/stdin`), the same way the custody key reaches the
+commands that sign; automatic release itself never reads the custody key.
+
+**A release that may have happened twice is never finished by guessing.** Before the escrow sends, the redemption is
+marked as started. The mark is cleared only when the marketplace is certain to have done nothing (a check failed before
+the transfer request, or it answered 400, 401 or 403); then the next run sends once. A transfer with no answer, or any
+other answer, leaves the mark: if the item is gone, the release is recorded; if the item is in the escrow again, the
+run stops, because the first transfer may have gone through and the item may have come back since. A person then
+looks at the escrow account's own transfer history and settles it:
+
+```bash
+bridge release resolve <item> sent       # the transfer went through: recorded as released, nothing is sent
+bridge release resolve <item> not-sent   # it did not: the next run sends it
+```
+
+Either way the original is never sent to the same account twice for one redemption.
+
 ## The proof that every copy is backed
 
 Anyone can run it (`bridge proof`, `src/proof.ts`), with no account:
@@ -81,7 +115,9 @@ proof makes a breach visible; it cannot prevent one.
 | Marketplace changes its rules or stops transfers | Deposits stop; redemptions continue while transfers work; if they stop for good the copies are the items' only working record |
 | Marketplace closes | The originals' title ends with it; the copies remain on Zcash |
 | Custody key stolen | Copies still in custody could be issued unbacked: the key signs nothing but issuance, every issuance needs a confirmed deposit, and the proof shows an unbacked copy at once |
-| Redemption to a wrong account | Marketplace transfers are final: the account is signed by the holder, shown back in full and format checked |
+| Redemption to a wrong account | Marketplace transfers are final: the account is signed by the holder, shown back in full and format checked; the escrow sends only to that account, and never to itself |
+| Escrow session ended, or stolen | Ended: releases hold until the account holder signs in again. Stolen: it can move what the escrow holds, like any marketplace session; the proof shows an original gone from the marker at once, and the session cannot reach the custody key or the copies |
+| A release answered by nothing | Marked as started before the send and never sent again by itself; a person settles it from the account's transfers (`bridge release resolve`) |
 | Two claims on one deposit | One ticket per item at a time; the binding decides |
 | A deposit and a redemption of one item at once | Refused: a redemption under way (requested, or returned and not yet released) blocks any deposit of the item, and a deposit under way blocks a redemption |
 | Item burned at the marketplace | Its copy never leaves custody |
@@ -114,9 +150,14 @@ The operator's command line (`src/cli.ts`) reads `bridge.config.json`:
   "binding": "listing",
   "asks": "default",
   "state": "state/bridge.json",
-  "escrowBook": "state/escrow.json"
+  "escrowBook": "state/escrow.json",
+  "escrowAccount": "<the escrow account's id, ZR-XXXX-XXXX>",
+  "escrowSessionFile": "/dev/stdin"
 }
 ```
+
+The last two are for `bridge release due` only: the escrow account every session is checked against, and where its
+session comes from (`escrowBase` names the marketplace if it differs from `venue`).
 
 `asks` picks the challenge and marker asks: `default` (8,888,888.<code> and 9,999,999.31415926 ZEC) or `fallback`
 (6,666,666.<code> and 7,654,321.31415926 ZEC) for a venue that refuses asks that large. Change it only while the escrow
